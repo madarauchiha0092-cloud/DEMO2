@@ -11,144 +11,138 @@ import asyncio
 from PIL import Image
 from transformers import BlipProcessor, BlipForConditionalGeneration
 
-# -------------------- Page Configuration --------------------
-st.set_page_config(
-    page_title="SlideSense",
-    page_icon="📘",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
-
+st.set_page_config(page_title="SlideSense", page_icon="📘", layout="wide")
 load_dotenv()
 
-# -------------------- BLIP Model for Image Recognition --------------------
 processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
 blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
 
-def describe_image(image: Image.Image):
-    """Return text description for uploaded image."""
+def describe_image(image):
     inputs = processor(image, return_tensors="pt")
     out = blip_model.generate(**inputs)
-    description = processor.decode(out[0], skip_special_tokens=True)
-    return description
+    return processor.decode(out[0], skip_special_tokens=True)
 
-# -------------------- Sidebar for Page Selection --------------------
-page = st.sidebar.selectbox("Choose Page", ["PDF Analyzer", "Image Recognition"])
-
-# -------------------- CSS Animations & Styling --------------------
 st.markdown("""
 <style>
-/* Your full previous CSS here (hero, glass-card, response-section, uploader, animations, etc.) */
+.hero { text-align:center; margin-bottom:25px }
+.hero h1 { font-size:44px; font-weight:800 }
+.hero p { color:#6b7280; font-size:17px }
+
+.card { background:white; padding:22px; border-radius:16px;
+box-shadow:0 10px 25px rgba(0,0,0,0.05) }
+
+.uploader { border:2px dashed #c7d2fe; padding:45px;
+border-radius:16px; text-align:center }
+
+.response { background:#f8fafc; padding:20px;
+border-radius:14px; margin-top:15px }
 </style>
 """, unsafe_allow_html=True)
 
-# -------------------- HERO SECTION --------------------
 st.markdown("""
-<div class="hero-section">
-    <h1 class="hero-title">SlideSense</h1>
-    <p class="hero-subtitle">Advanced Document & Image Analysis with AI Technology</p>
+<div class="hero">
+<h1>✨ SlideSense</h1>
+<p>Chat, Summarize & Analyze PDFs and Images using AI</p>
 </div>
 """, unsafe_allow_html=True)
 
-# -------------------- PDF Analyzer --------------------
-if page == "PDF Analyzer":
-    pdf = st.file_uploader("Document Upload", type="pdf", help="Choose a PDF document for analysis")
-    
-    if pdf is not None:
-        with st.spinner('Processing your document...'):
-            pdf_reader = PdfReader(pdf)
-            text = ""
-            for page_pdf in pdf_reader.pages:
-                text += page_pdf.extract_text()
-                text += "\n\n"
+mode = st.radio(
+    "",
+    ["💬 Chat", "📄 Summary", "🖼️ Image"],
+    horizontal=True,
+    label_visibility="collapsed"
+)
 
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=80)
-            splitted_text = text_splitter.split_text(text)
+left, right = st.columns([1,1])
+
+if mode in ["💬 Chat", "📄 Summary"]:
+    with left:
+        st.markdown("<div class='card uploader'>Upload PDF</div>", unsafe_allow_html=True)
+        pdf = st.file_uploader("", type="pdf", label_visibility="collapsed")
+
+    if pdf:
+        with st.spinner("Processing document..."):
+            reader = PdfReader(pdf)
+            text = ""
+            for p in reader.pages:
+                text += p.extract_text() + "\n"
+
+            splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=80)
+            chunks = splitter.split_text(text)
 
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
                 asyncio.set_event_loop(asyncio.new_event_loop())
 
-            embeddings = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
-            vector_db = FAISS.from_texts(splitted_text, embeddings)
+            embeddings = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
+            vector_db = FAISS.from_texts(chunks, embeddings)
 
-        st.markdown("""
-        <div class="success-notification">
-            <p class="success-text">✅ Document processed successfully and ready for queries</p>
-        </div>
-        """, unsafe_allow_html=True)
+            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
 
-        st.markdown("""
-        <div class="query-section">
-            <div class="section-title">Query Interface</div>
-            <div class="section-subtitle">Ask intelligent questions about your document</div>
-        </div>
-        """, unsafe_allow_html=True)
+        with right:
+            if mode == "💬 Chat":
+                query = st.text_input(
+                    "",
+                    placeholder="Ask a question about the document"
+                )
 
-        user_query = st.text_input(
-            "Ask a question",
-            placeholder="Enter your question about the document...",
-            help="Type your question here",
-            label_visibility="collapsed"
+                if query:
+                    with st.spinner("Generating answer..."):
+                        docs = vector_db.similarity_search(query)
+                        prompt = ChatPromptTemplate.from_template(
+                            "Answer using the context below:\n{context}\nQuestion: {question}"
+                        )
+                        chain = create_stuff_documents_chain(llm, prompt)
+                        answer = chain.invoke(
+                            {"context": docs, "question": query}
+                        )
+
+                    st.markdown(
+                        f"<div class='response'>{answer}</div>",
+                        unsafe_allow_html=True
+                    )
+
+            if mode == "📄 Summary":
+                if st.button("Generate Summary"):
+                    with st.spinner("Generating summary..."):
+                        full_text = "\n".join(chunks)
+
+                        prompt = ChatPromptTemplate.from_template(
+                            """
+                            Summarize the document below clearly and concisely.
+                            Use bullet points where appropriate.
+                            Do not add information not present in the document.
+
+                            Document:
+                            {context}
+                            """
+                        )
+
+                        chain = create_stuff_documents_chain(llm, prompt)
+                        summary = chain.invoke({"context": full_text})
+
+                    st.markdown(
+                        f"<div class='response'>{summary}</div>",
+                        unsafe_allow_html=True
+                    )
+
+if mode == "🖼️ Image":
+    with left:
+        st.markdown("<div class='card uploader'>Upload Image</div>", unsafe_allow_html=True)
+        image_file = st.file_uploader(
+            "", type=["png", "jpg", "jpeg"], label_visibility="collapsed"
         )
 
-        if user_query:
-            with st.spinner('🤖 Generating intelligent response...'):
-                docs = vector_db.similarity_search(user_query)
-                llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
-                prompt = ChatPromptTemplate.from_template(
-                    "Answer the following:\n{context}\nQuestion: {question}\n Read the context carefully and then answer it"
-                )
-                chain = create_stuff_documents_chain(llm, prompt)
-                response = chain.invoke({"context": docs, "question": user_query})
-
-            st.markdown(f"""
-            <div class="response-section">
-                <div class="response-header">
-                    <span class="response-icon">🤖</span>
-                    <h3 class="response-title">Response</h3>
-                </div>
-                <div class="response-content">{response}</div>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div class="instruction-container">
-            <div class="instruction-title">Get Started</div>
-            <div class="instruction-text">
-                Upload your PDF document above to unlock the power of AI-driven document analysis. 
-                Ask questions, extract insights, and discover information with intelligent search capabilities.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-# -------------------- IMAGE RECOGNITION --------------------
-if page == "Image Recognition":
-    image_file = st.file_uploader("Upload an Image", type=["png","jpg","jpeg"], help="Choose an image for recognition")
-    
-    if image_file is not None:
+    if image_file:
         img = Image.open(image_file)
-        st.image(img, caption="Uploaded Image", use_column_width=True)
-        
-        with st.spinner("🔍 Analyzing image..."):
-            description = describe_image(img)
-        
-        st.markdown(f"""
-        <div class="response-section">
-            <div class="response-header">
-                <span class="response-icon">🖼️</span>
-                <h3 class="response-title">Image Description</h3>
-            </div>
-            <div class="response-content">{description}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div class="instruction-container">
-            <div class="instruction-title">Get Started</div>
-            <div class="instruction-text">
-                Upload an image to get an AI-generated description of its contents.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        with right:
+            st.image(img, use_column_width=True)
+            with st.spinner("Analyzing image..."):
+                description = describe_image(img)
+            st.markdown(
+                f"<div class='response'>{description}</div>",
+                unsafe_allow_html=True
+            )
