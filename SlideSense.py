@@ -26,10 +26,14 @@ def describe_image(image):
     out = blip_model.generate(**inputs)
     return processor.decode(out[0], skip_special_tokens=True)
 
+# ---------------- SESSION STATE ----------------
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
 # ---------------- STYLES ----------------
 st.markdown("""
 <style>
-.hero { text-align:center; margin-bottom:30px }
+.hero { text-align:center; margin-bottom:25px }
 .hero h1 { font-size:44px; font-weight:800 }
 .hero p { color:#6b7280; font-size:17px }
 
@@ -48,11 +52,17 @@ st.markdown("""
 }
 
 .response {
-    background:linear-gradient(145deg,#f8fafc,#eef2ff);
+    background:#f8fafc;
     padding:20px;
     border-radius:14px;
-    margin-top:12px;
-    border-left:4px solid #6366f1
+    margin-top:15px
+}
+
+.history {
+    background:#eef2ff;
+    padding:14px;
+    border-radius:12px;
+    margin-bottom:10px
 }
 </style>
 """, unsafe_allow_html=True)
@@ -65,7 +75,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ---------------- MODE SELECT ----------------
+# ---------------- MODE ----------------
 mode = st.radio(
     "",
     ["💬 Chat", "📄 Summary", "🖼️ Image"],
@@ -75,116 +85,89 @@ mode = st.radio(
 
 left, right = st.columns([1, 1])
 
-# ---------------- SESSION STATE ----------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-if "vector_db" not in st.session_state:
-    st.session_state.vector_db = None
-
-if "chunks" not in st.session_state:
-    st.session_state.chunks = None
-
-# ---------------- PDF PROCESSING ----------------
-@st.cache_resource
-def process_pdf(pdf_file):
-    reader = PdfReader(pdf_file)
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text() + "\n"
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=80
-    )
-    chunks = splitter.split_text(text)
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
-
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
-    vector_db = FAISS.from_texts(chunks, embeddings)
-
-    return vector_db, chunks
-
 # ---------------- PDF MODES ----------------
 if mode in ["💬 Chat", "📄 Summary"]:
     with left:
         st.markdown("<div class='card uploader'>Upload PDF</div>", unsafe_allow_html=True)
         pdf = st.file_uploader("", type="pdf", label_visibility="collapsed")
 
+        # -------- CHAT HISTORY (LEFT SIDE) --------
+        if mode == "💬 Chat" and st.session_state.chat_history:
+            st.markdown("### 💬 Chat History")
+            for q, a in st.session_state.chat_history:
+                st.markdown(
+                    f"""
+                    <div class='history'>
+                    <b>Q:</b> {q}<br><br>
+                    <b>A:</b> {a}
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
     if pdf:
         with st.spinner("Processing document..."):
-            st.session_state.vector_db, st.session_state.chunks = process_pdf(pdf)
+            reader = PdfReader(pdf)
+            text = ""
+            for p in reader.pages:
+                text += p.extract_text() + "\n"
 
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=500,
+                chunk_overlap=80
+            )
+            chunks = splitter.split_text(text)
+
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.set_event_loop(asyncio.new_event_loop())
+
+            embeddings = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
+            vector_db = FAISS.from_texts(chunks, embeddings)
+
+            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
 
         # ---------------- CHAT MODE ----------------
         if mode == "💬 Chat":
             with right:
-                # Show chat history
-                for msg in st.session_state.messages:
-                    st.chat_message(msg["role"]).markdown(msg["content"])
-
-                # Quick actions
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    if st.button("📌 Key Points"):
-                        st.session_state.messages.append(
-                            {"role": "user", "content": "List key points from the document"}
-                        )
-                        st.rerun()
-                with col2:
-                    if st.button("🧠 Explain Simply"):
-                        st.session_state.messages.append(
-                            {"role": "user", "content": "Explain this document in simple terms"}
-                        )
-                        st.rerun()
-                with col3:
-                    if st.button("❓ Exam Questions"):
-                        st.session_state.messages.append(
-                            {"role": "user", "content": "Generate possible exam questions"}
-                        )
-                        st.rerun()
-
-                # Chat input
-                query = st.chat_input("Ask a question about the document")
+                query = st.text_input(
+                    "",
+                    placeholder="Ask a question about the document"
+                )
 
                 if query:
-                    st.session_state.messages.append(
-                        {"role": "user", "content": query}
-                    )
-
                     with st.spinner("Generating answer..."):
-                        docs = st.session_state.vector_db.similarity_search(query)
+                        docs = vector_db.similarity_search(query)
                         prompt = ChatPromptTemplate.from_template(
-                            "Answer using the context below:\n{context}\n\nQuestion: {question}"
+                            "Answer using the context below:\n{context}\nQuestion: {question}"
                         )
                         chain = create_stuff_documents_chain(llm, prompt)
                         answer = chain.invoke(
                             {"context": docs, "question": query}
                         )
 
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": answer}
+                    # Save history
+                    st.session_state.chat_history.append((query, answer))
+
+                    st.markdown(
+                        f"<div class='response'>{answer}</div>",
+                        unsafe_allow_html=True
                     )
-                    st.rerun()
 
         # ---------------- SUMMARY MODE ----------------
         if mode == "📄 Summary":
             with right:
-                if st.button("📄 Generate Summary"):
+                if st.button("Generate Summary"):
                     with st.spinner("Generating summary..."):
-                        full_text = "\n".join(st.session_state.chunks)
+                        full_text = "\n".join(chunks)
                         prompt = ChatPromptTemplate.from_template(
                             """
                             Summarize the document clearly and concisely.
                             Use bullet points.
-                            Do not add external information.
+                            Do not add information not present in the document.
 
                             Document:
                             {context}
@@ -197,9 +180,6 @@ if mode in ["💬 Chat", "📄 Summary"]:
                         f"<div class='response'>{summary}</div>",
                         unsafe_allow_html=True
                     )
-
-    else:
-        st.info("👈 Upload a PDF to get started")
 
 # ---------------- IMAGE MODE ----------------
 if mode == "🖼️ Image":
@@ -219,4 +199,3 @@ if mode == "🖼️ Image":
                 f"<div class='response'>{description}</div>",
                 unsafe_allow_html=True
             )
-            st.caption("🧠 AI-generated image description")
