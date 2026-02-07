@@ -10,6 +10,15 @@ from dotenv import load_dotenv
 import asyncio
 from PIL import Image
 from transformers import BlipProcessor, BlipForConditionalGeneration
+import random, smtplib, time
+from email.message import EmailMessage
+
+# -------------------- CONFIG --------------------
+EMAIL_SENDER = "your_email@gmail.com"
+EMAIL_PASSWORD = "your_gmail_app_password"
+
+OTP_EXPIRY_TIME = 120       # seconds
+OTP_RESEND_COOLDOWN = 30    # seconds
 
 # -------------------- Page Configuration --------------------
 st.set_page_config(
@@ -22,51 +31,111 @@ st.set_page_config(
 load_dotenv()
 
 # -------------------- Session State --------------------
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+defaults = {
+    "chat_history": [],
+    "vector_db": None,
+    "authenticated": False,
+    "users": {"admin": "admin123"},
+    "otp": None,
+    "otp_email": None,
+    "otp_time": None,
+    "otp_last_sent": 0
+}
 
-if "vector_db" not in st.session_state:
-    st.session_state.vector_db = None
+for k,v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
+# -------------------- OTP SYSTEM --------------------
+def send_otp(email):
+    now = time.time()
+    if now - st.session_state.otp_last_sent < OTP_RESEND_COOLDOWN:
+        raise Exception("Resend cooldown active")
 
-if "users" not in st.session_state:
-    # default user
-    st.session_state.users = {
-        "admin": "admin123"
-    }
+    otp = random.randint(100000, 999999)
+    st.session_state.otp = str(otp)
+    st.session_state.otp_email = email
+    st.session_state.otp_time = now
+    st.session_state.otp_last_sent = now
 
-# -------------------- AUTH SYSTEM --------------------
+    msg = EmailMessage()
+    msg.set_content(f"Your SlideSense OTP is: {otp}\nValid for 2 minutes.")
+    msg["Subject"] = "SlideSense Login OTP"
+    msg["From"] = EMAIL_SENDER
+    msg["To"] = email
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        server.send_message(msg)
+
+def verify_otp(user_otp):
+    if not st.session_state.otp:
+        return False, "No OTP generated"
+
+    if time.time() - st.session_state.otp_time > OTP_EXPIRY_TIME:
+        st.session_state.otp = None
+        return False, "OTP expired"
+
+    if user_otp == st.session_state.otp:
+        st.session_state.otp = None
+        return True, "Success"
+    else:
+        return False, "Invalid OTP"
+
+# -------------------- AUTH UI --------------------
 def login_ui():
     st.markdown("<h1 style='text-align:center;'>🔐 SlideSense Login</h1>", unsafe_allow_html=True)
+    tab1, tab2, tab3 = st.tabs(["Login", "Sign Up", "Email OTP Login"])
 
-    tab1, tab2 = st.tabs(["Login", "Sign Up"])
-
+    # ----- Login -----
     with tab1:
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
         if st.button("Login"):
-            if username in st.session_state.users and st.session_state.users[username] == password:
+            if u in st.session_state.users and st.session_state.users[u] == p:
                 st.session_state.authenticated = True
                 st.success("✅ Login successful")
                 st.rerun()
             else:
-                st.error("❌ Invalid username or password")
+                st.error("❌ Invalid credentials")
 
+    # ----- Signup -----
     with tab2:
-        new_user = st.text_input("Create Username")
-        new_pass = st.text_input("Create Password", type="password")
-
+        nu = st.text_input("Create Username")
+        np = st.text_input("Create Password", type="password")
         if st.button("Sign Up"):
-            if new_user in st.session_state.users:
-                st.warning("⚠️ User already exists")
-            elif new_user == "" or new_pass == "":
-                st.warning("⚠️ Fields cannot be empty")
+            if nu in st.session_state.users:
+                st.warning("User exists")
+            elif nu == "" or np == "":
+                st.warning("Fields required")
             else:
-                st.session_state.users[new_user] = new_pass
-                st.success("✅ Account created successfully")
+                st.session_state.users[nu] = np
+                st.success("Account created")
+
+    # ----- OTP Login -----
+    with tab3:
+        email = st.text_input("Email Address")
+
+        if st.button("Send OTP"):
+            if email:
+                try:
+                    send_otp(email)
+                    st.success("📧 OTP sent")
+                except:
+                    st.warning("⏳ Wait before resending OTP")
+            else:
+                st.warning("Enter email")
+
+        otp_in = st.text_input("Enter OTP")
+
+        if st.button("Verify OTP"):
+            ok, msg = verify_otp(otp_in)
+            if ok:
+                st.session_state.authenticated = True
+                st.success("✅ OTP Verified")
+                st.rerun()
+            else:
+                st.error(msg)
 
 # -------------------- BLIP Model --------------------
 @st.cache_resource
@@ -80,8 +149,7 @@ processor, blip_model = load_blip()
 def describe_image(image: Image.Image):
     inputs = processor(image, return_tensors="pt")
     out = blip_model.generate(**inputs)
-    description = processor.decode(out[0], skip_special_tokens=True)
-    return description
+    return processor.decode(out[0], skip_special_tokens=True)
 
 # -------------------- AUTH CHECK --------------------
 if not st.session_state.authenticated:
@@ -89,25 +157,17 @@ if not st.session_state.authenticated:
     st.stop()
 
 # -------------------- Sidebar --------------------
-st.sidebar.markdown("## 👤 User Panel")
 st.sidebar.success("Logged in")
-
 if st.sidebar.button("🚪 Logout"):
-    st.session_state.authenticated = False
-    st.session_state.chat_history = []
-    st.session_state.vector_db = None
+    for k in defaults:
+        st.session_state[k] = defaults[k]
     st.rerun()
 
 page = st.sidebar.selectbox("Choose Mode", ["PDF Analyzer", "Image Recognition"])
 
 st.sidebar.markdown("## 💬 Chat History")
-if st.session_state.chat_history:
-    for i, (q, a) in enumerate(st.session_state.chat_history[-10:], 1):
-        st.sidebar.markdown(f"**Q{i}:** {q[:40]}...")
-
-if st.sidebar.button("🧹 Clear Chat History"):
-    st.session_state.chat_history = []
-    st.sidebar.success("Chat history cleared")
+for i,(q,a) in enumerate(st.session_state.chat_history[-10:],1):
+    st.sidebar.markdown(f"Q{i}: {q[:40]}")
 
 # -------------------- HERO --------------------
 st.markdown("""
@@ -127,83 +187,63 @@ if page == "PDF Analyzer":
                 text = ""
                 for p in reader.pages:
                     if p.extract_text():
-                        text += p.extract_text() + "\n\n"
+                        text += p.extract_text()+"\n"
 
                 splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=80)
                 chunks = splitter.split_text(text)
 
                 try:
                     asyncio.get_running_loop()
-                except RuntimeError:
+                except:
                     asyncio.set_event_loop(asyncio.new_event_loop())
 
                 embeddings = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
                 st.session_state.vector_db = FAISS.from_texts(chunks, embeddings)
 
-        st.success("✅ Document processed successfully")
+        st.success("Document processed")
 
-        user_query = st.text_input("Ask a question about the document")
+        q = st.text_input("Ask a question")
 
-        if user_query:
-            with st.spinner("🤖 Thinking..."):
-                docs = st.session_state.vector_db.similarity_search(user_query, k=5)
-                llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+        if q:
+            docs = st.session_state.vector_db.similarity_search(q, k=5)
+            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
 
-                history_context = ""
-                for q, a in st.session_state.chat_history[-5:]:
-                    history_context += f"Q: {q}\nA: {a}\n\n"
+            history = ""
+            for x,y in st.session_state.chat_history[-5:]:
+                history += f"Q:{x}\nA:{y}\n"
 
-                prompt = ChatPromptTemplate.from_template(
-                    """
-You are an AI document assistant.
-
-Conversation History:
+            prompt = ChatPromptTemplate.from_template("""
+History:
 {history}
 
-Document Context:
+Context:
 {context}
 
-User Question:
+Question:
 {question}
 
 Rules:
 - Answer only from document
-- If not found, say: "Information not found in the document"
-- Be clear and concise
-"""
-                )
+- If not found say: Information not found in the document
+""")
 
-                chain = create_stuff_documents_chain(llm, prompt)
-                response = chain.invoke({
-                    "context": docs,
-                    "question": user_query,
-                    "history": history_context
-                })
+            chain = create_stuff_documents_chain(llm, prompt)
+            res = chain.invoke({"context":docs,"question":q,"history":history})
 
-                st.session_state.chat_history.append((user_query, response))
+            st.session_state.chat_history.append((q,res))
 
         st.markdown("## 💬 Conversation")
-        for q, a in st.session_state.chat_history:
-            st.markdown(f"**👤 User:** {q}")
-            st.markdown(f"**🤖 SlideSense:** {a}")
+        for q,a in st.session_state.chat_history:
+            st.markdown(f"**User:** {q}")
+            st.markdown(f"**SlideSense:** {a}")
             st.markdown("---")
-
-    else:
-        st.info("Upload a PDF to start analysis")
 
 # -------------------- IMAGE RECOGNITION --------------------
 if page == "Image Recognition":
-    image_file = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
-
-    if image_file:
-        img = Image.open(image_file)
+    img_file = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
+    if img_file:
+        img = Image.open(img_file)
         st.image(img, use_column_width=True)
-
         with st.spinner("Analyzing image..."):
             desc = describe_image(img)
-
-        st.markdown("## 🖼️ Image Description")
         st.success(desc)
-
-    else:
-        st.info("Upload an image for AI analysis")
