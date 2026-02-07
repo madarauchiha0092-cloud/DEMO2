@@ -11,191 +11,199 @@ import asyncio
 from PIL import Image
 from transformers import BlipProcessor, BlipForConditionalGeneration
 
-# ---------------- CONFIG ----------------
-st.set_page_config(page_title="SlideSense", page_icon="📘", layout="wide")
-load_dotenv()
-
-# ---------------- IMAGE MODEL ----------------
-processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-blip_model = BlipForConditionalGeneration.from_pretrained(
-    "Salesforce/blip-image-captioning-base"
+# -------------------- Page Configuration --------------------
+st.set_page_config(
+    page_title="SlideSense",
+    page_icon="📘",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-def describe_image(image):
-    inputs = processor(image, return_tensors="pt")
-    out = blip_model.generate(**inputs)
-    return processor.decode(out[0], skip_special_tokens=True)
+load_dotenv()
 
-# ---------------- SESSION STATE ----------------
+# -------------------- Session State --------------------
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# ---------------- STYLES ----------------
+if "vector_db" not in st.session_state:
+    st.session_state.vector_db = None
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if "users" not in st.session_state:
+    # default user
+    st.session_state.users = {
+        "admin": "admin123"
+    }
+
+# -------------------- AUTH SYSTEM --------------------
+def login_ui():
+    st.markdown("<h1 style='text-align:center;'>🔐 SlideSense Login</h1>", unsafe_allow_html=True)
+
+    tab1, tab2 = st.tabs(["Login", "Sign Up"])
+
+    with tab1:
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+
+        if st.button("Login"):
+            if username in st.session_state.users and st.session_state.users[username] == password:
+                st.session_state.authenticated = True
+                st.success("✅ Login successful")
+                st.rerun()
+            else:
+                st.error("❌ Invalid username or password")
+
+    with tab2:
+        new_user = st.text_input("Create Username")
+        new_pass = st.text_input("Create Password", type="password")
+
+        if st.button("Sign Up"):
+            if new_user in st.session_state.users:
+                st.warning("⚠️ User already exists")
+            elif new_user == "" or new_pass == "":
+                st.warning("⚠️ Fields cannot be empty")
+            else:
+                st.session_state.users[new_user] = new_pass
+                st.success("✅ Account created successfully")
+
+# -------------------- BLIP Model --------------------
+@st.cache_resource
+def load_blip():
+    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+    return processor, model
+
+processor, blip_model = load_blip()
+
+def describe_image(image: Image.Image):
+    inputs = processor(image, return_tensors="pt")
+    out = blip_model.generate(**inputs)
+    description = processor.decode(out[0], skip_special_tokens=True)
+    return description
+
+# -------------------- AUTH CHECK --------------------
+if not st.session_state.authenticated:
+    login_ui()
+    st.stop()
+
+# -------------------- Sidebar --------------------
+st.sidebar.markdown("## 👤 User Panel")
+st.sidebar.success("Logged in")
+
+if st.sidebar.button("🚪 Logout"):
+    st.session_state.authenticated = False
+    st.session_state.chat_history = []
+    st.session_state.vector_db = None
+    st.rerun()
+
+page = st.sidebar.selectbox("Choose Mode", ["PDF Analyzer", "Image Recognition"])
+
+st.sidebar.markdown("## 💬 Chat History")
+if st.session_state.chat_history:
+    for i, (q, a) in enumerate(st.session_state.chat_history[-10:], 1):
+        st.sidebar.markdown(f"**Q{i}:** {q[:40]}...")
+
+if st.sidebar.button("🧹 Clear Chat History"):
+    st.session_state.chat_history = []
+    st.sidebar.success("Chat history cleared")
+
+# -------------------- HERO --------------------
 st.markdown("""
-<style>
-.hero { text-align:center; margin-bottom:25px }
-.hero h1 { font-size:44px; font-weight:800 }
-.hero p { color:#6b7280; font-size:17px }
-
-.card {
-    background:white;
-    padding:22px;
-    border-radius:16px;
-    box-shadow:0 10px 25px rgba(0,0,0,0.05)
-}
-
-.uploader {
-    border:2px dashed #c7d2fe;
-    padding:45px;
-    border-radius:16px;
-    text-align:center
-}
-
-.response {
-    background:#f8fafc;
-    padding:20px;
-    border-radius:14px;
-    margin-top:15px
-}
-
-.history {
-    background:#eef2ff;
-    padding:14px;
-    border-radius:12px;
-    margin-bottom:10px
-}
-</style>
+<h1 style='text-align:center;'>📘 SlideSense</h1>
+<p style='text-align:center;'>AI Powered PDF Analyzer & Image Intelligence System</p>
+<hr>
 """, unsafe_allow_html=True)
 
-# ---------------- HEADER ----------------
-st.markdown("""
-<div class="hero">
-<h1>✨ SlideSense</h1>
-<p>Chat, Summarize & Analyze PDFs and Images using AI</p>
-</div>
-""", unsafe_allow_html=True)
-
-# ---------------- MODE ----------------
-mode = st.radio(
-    "",
-    ["💬 Chat", "📄 Summary", "🖼️ Image"],
-    horizontal=True,
-    label_visibility="collapsed"
-)
-
-left, right = st.columns([1, 1])
-
-# ---------------- PDF MODES ----------------
-if mode in ["💬 Chat", "📄 Summary"]:
-    with left:
-        st.markdown("<div class='card uploader'>Upload PDF</div>", unsafe_allow_html=True)
-        pdf = st.file_uploader("", type="pdf", label_visibility="collapsed")
-
-        # -------- CHAT HISTORY (LEFT SIDE) --------
-        if mode == "💬 Chat" and st.session_state.chat_history:
-            st.markdown("### 💬 Chat History")
-            for q, a in st.session_state.chat_history:
-                st.markdown(
-                    f"""
-                    <div class='history'>
-                    <b>Q:</b> {q}<br><br>
-                    <b>A:</b> {a}
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+# -------------------- PDF ANALYZER --------------------
+if page == "PDF Analyzer":
+    pdf = st.file_uploader("Upload PDF", type="pdf")
 
     if pdf:
-        with st.spinner("Processing document..."):
-            reader = PdfReader(pdf)
-            text = ""
-            for p in reader.pages:
-                text += p.extract_text() + "\n"
+        if st.session_state.vector_db is None:
+            with st.spinner("Processing PDF..."):
+                reader = PdfReader(pdf)
+                text = ""
+                for p in reader.pages:
+                    if p.extract_text():
+                        text += p.extract_text() + "\n\n"
 
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=500,
-                chunk_overlap=80
-            )
-            chunks = splitter.split_text(text)
+                splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=80)
+                chunks = splitter.split_text(text)
 
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                asyncio.set_event_loop(asyncio.new_event_loop())
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.set_event_loop(asyncio.new_event_loop())
 
-            embeddings = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2"
-            )
-            vector_db = FAISS.from_texts(chunks, embeddings)
+                embeddings = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
+                st.session_state.vector_db = FAISS.from_texts(chunks, embeddings)
 
-            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+        st.success("✅ Document processed successfully")
 
-        # ---------------- CHAT MODE ----------------
-        if mode == "💬 Chat":
-            with right:
-                query = st.text_input(
-                    "",
-                    placeholder="Ask a question about the document"
+        user_query = st.text_input("Ask a question about the document")
+
+        if user_query:
+            with st.spinner("🤖 Thinking..."):
+                docs = st.session_state.vector_db.similarity_search(user_query, k=5)
+                llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+
+                history_context = ""
+                for q, a in st.session_state.chat_history[-5:]:
+                    history_context += f"Q: {q}\nA: {a}\n\n"
+
+                prompt = ChatPromptTemplate.from_template(
+                    """
+You are an AI document assistant.
+
+Conversation History:
+{history}
+
+Document Context:
+{context}
+
+User Question:
+{question}
+
+Rules:
+- Answer only from document
+- If not found, say: "Information not found in the document"
+- Be clear and concise
+"""
                 )
 
-                if query:
-                    with st.spinner("Generating answer..."):
-                        docs = vector_db.similarity_search(query)
-                        prompt = ChatPromptTemplate.from_template(
-                            "Answer using the context below:\n{context}\nQuestion: {question}"
-                        )
-                        chain = create_stuff_documents_chain(llm, prompt)
-                        answer = chain.invoke(
-                            {"context": docs, "question": query}
-                        )
+                chain = create_stuff_documents_chain(llm, prompt)
+                response = chain.invoke({
+                    "context": docs,
+                    "question": user_query,
+                    "history": history_context
+                })
 
-                    # Save history
-                    st.session_state.chat_history.append((query, answer))
+                st.session_state.chat_history.append((user_query, response))
 
-                    st.markdown(
-                        f"<div class='response'>{answer}</div>",
-                        unsafe_allow_html=True
-                    )
+        st.markdown("## 💬 Conversation")
+        for q, a in st.session_state.chat_history:
+            st.markdown(f"**👤 User:** {q}")
+            st.markdown(f"**🤖 SlideSense:** {a}")
+            st.markdown("---")
 
-        # ---------------- SUMMARY MODE ----------------
-        if mode == "📄 Summary":
-            with right:
-                if st.button("Generate Summary"):
-                    with st.spinner("Generating summary..."):
-                        full_text = "\n".join(chunks)
-                        prompt = ChatPromptTemplate.from_template(
-                            """
-                            Summarize the document clearly and concisely.
-                            Use bullet points.
-                            Do not add information not present in the document.
+    else:
+        st.info("Upload a PDF to start analysis")
 
-                            Document:
-                            {context}
-                            """
-                        )
-                        chain = create_stuff_documents_chain(llm, prompt)
-                        summary = chain.invoke({"context": full_text})
-
-                    st.markdown(
-                        f"<div class='response'>{summary}</div>",
-                        unsafe_allow_html=True
-                    )
-
-# ---------------- IMAGE MODE ----------------
-if mode == "🖼️ Image":
-    with left:
-        st.markdown("<div class='card uploader'>Upload Image</div>", unsafe_allow_html=True)
-        image_file = st.file_uploader(
-            "", type=["png", "jpg", "jpeg"], label_visibility="collapsed"
-        )
+# -------------------- IMAGE RECOGNITION --------------------
+if page == "Image Recognition":
+    image_file = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
 
     if image_file:
         img = Image.open(image_file)
-        with right:
-            st.image(img, use_column_width=True)
-            with st.spinner("Analyzing image..."):
-                description = describe_image(img)
-            st.markdown(
-                f"<div class='response'>{description}</div>",
-                unsafe_allow_html=True
-            )
+        st.image(img, use_column_width=True)
+
+        with st.spinner("Analyzing image..."):
+            desc = describe_image(img)
+
+        st.markdown("## 🖼️ Image Description")
+        st.success(desc)
+
+    else:
+        st.info("Upload an image for AI analysis")
