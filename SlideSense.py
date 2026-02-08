@@ -6,19 +6,9 @@ from langchain_community.vectorstores import FAISS
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
-from dotenv import load_dotenv
 import asyncio
 from PIL import Image
 from transformers import BlipProcessor, BlipForConditionalGeneration
-import random, smtplib, time
-from email.message import EmailMessage
-
-# -------------------- CONFIG --------------------
-EMAIL_SENDER = "your_email@gmail.com"
-EMAIL_PASSWORD = "your_gmail_app_password"
-
-OTP_EXPIRY_TIME = 120       # seconds
-OTP_RESEND_COOLDOWN = 30    # seconds
 
 # -------------------- Page Configuration --------------------
 st.set_page_config(
@@ -28,67 +18,57 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-load_dotenv()
+# -------------------- CSS ANIMATIONS & HOVERS --------------------
+st.markdown("""
+<style>
+.fade-in {
+    animation: fadeIn 1.2s ease-in-out;
+}
+@keyframes fadeIn {
+    from {opacity: 0; transform: translateY(10px);}
+    to {opacity: 1; transform: translateY(0);}
+}
+
+.hover-card {
+    transition: 0.3s;
+    padding: 15px;
+    border-radius: 12px;
+}
+.hover-card:hover {
+    transform: scale(1.02);
+    box-shadow: 0 0 15px rgba(0,0,0,0.15);
+}
+
+button {
+    transition: 0.3s !important;
+}
+button:hover {
+    transform: scale(1.05);
+    filter: brightness(1.1);
+}
+</style>
+""", unsafe_allow_html=True)
 
 # -------------------- Session State --------------------
 defaults = {
     "chat_history": [],
     "vector_db": None,
     "authenticated": False,
-    "users": {"admin": "admin123"},
-    "otp": None,
-    "otp_email": None,
-    "otp_time": None,
-    "otp_last_sent": 0
+    "users": {"admin": "admin123"}
 }
 
 for k,v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# -------------------- OTP SYSTEM --------------------
-def send_otp(email):
-    now = time.time()
-    if now - st.session_state.otp_last_sent < OTP_RESEND_COOLDOWN:
-        raise Exception("Resend cooldown active")
-
-    otp = random.randint(100000, 999999)
-    st.session_state.otp = str(otp)
-    st.session_state.otp_email = email
-    st.session_state.otp_time = now
-    st.session_state.otp_last_sent = now
-
-    msg = EmailMessage()
-    msg.set_content(f"Your SlideSense OTP is: {otp}\nValid for 2 minutes.")
-    msg["Subject"] = "SlideSense Login OTP"
-    msg["From"] = EMAIL_SENDER
-    msg["To"] = email
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.send_message(msg)
-
-def verify_otp(user_otp):
-    if not st.session_state.otp:
-        return False, "No OTP generated"
-
-    if time.time() - st.session_state.otp_time > OTP_EXPIRY_TIME:
-        st.session_state.otp = None
-        return False, "OTP expired"
-
-    if user_otp == st.session_state.otp:
-        st.session_state.otp = None
-        return True, "Success"
-    else:
-        return False, "Invalid OTP"
-
 # -------------------- AUTH UI --------------------
 def login_ui():
-    st.markdown("<h1 style='text-align:center;'>🔐 SlideSense Login</h1>", unsafe_allow_html=True)
-    tab1, tab2, tab3 = st.tabs(["Login", "Sign Up", "Email OTP Login"])
+    st.markdown("<h1 class='fade-in' style='text-align:center;'>🔐 SlideSense Login</h1>", unsafe_allow_html=True)
+    tab1, tab2 = st.tabs(["Login", "Sign Up"])
 
     # ----- Login -----
     with tab1:
+        st.markdown("<div class='hover-card fade-in'>", unsafe_allow_html=True)
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
         if st.button("Login"):
@@ -98,9 +78,11 @@ def login_ui():
                 st.rerun()
             else:
                 st.error("❌ Invalid credentials")
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # ----- Signup -----
     with tab2:
+        st.markdown("<div class='hover-card fade-in'>", unsafe_allow_html=True)
         nu = st.text_input("Create Username")
         np = st.text_input("Create Password", type="password")
         if st.button("Sign Up"):
@@ -110,32 +92,8 @@ def login_ui():
                 st.warning("Fields required")
             else:
                 st.session_state.users[nu] = np
-                st.success("Account created")
-
-    # ----- OTP Login -----
-    with tab3:
-        email = st.text_input("Email Address")
-
-        if st.button("Send OTP"):
-            if email:
-                try:
-                    send_otp(email)
-                    st.success("📧 OTP sent")
-                except:
-                    st.warning("⏳ Wait before resending OTP")
-            else:
-                st.warning("Enter email")
-
-        otp_in = st.text_input("Enter OTP")
-
-        if st.button("Verify OTP"):
-            ok, msg = verify_otp(otp_in)
-            if ok:
-                st.session_state.authenticated = True
-                st.success("✅ OTP Verified")
-                st.rerun()
-            else:
-                st.error(msg)
+                st.success("Account created successfully 🎉")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 # -------------------- BLIP Model --------------------
 @st.cache_resource
@@ -157,7 +115,7 @@ if not st.session_state.authenticated:
     st.stop()
 
 # -------------------- Sidebar --------------------
-st.sidebar.success("Logged in")
+st.sidebar.success("✅ Logged in")
 if st.sidebar.button("🚪 Logout"):
     for k in defaults:
         st.session_state[k] = defaults[k]
@@ -171,14 +129,16 @@ for i,(q,a) in enumerate(st.session_state.chat_history[-10:],1):
 
 # -------------------- HERO --------------------
 st.markdown("""
-<h1 style='text-align:center;'>📘 SlideSense</h1>
-<p style='text-align:center;'>AI Powered PDF Analyzer & Image Intelligence System</p>
+<h1 class='fade-in' style='text-align:center;'>📘 SlideSense</h1>
+<p class='fade-in' style='text-align:center;'>AI Powered PDF Analyzer & Image Intelligence System</p>
 <hr>
 """, unsafe_allow_html=True)
 
 # -------------------- PDF ANALYZER --------------------
 if page == "PDF Analyzer":
+    st.markdown("<div class='fade-in hover-card'>", unsafe_allow_html=True)
     pdf = st.file_uploader("Upload PDF", type="pdf")
+    st.markdown("</div>", unsafe_allow_html=True)
 
     if pdf:
         if st.session_state.vector_db is None:
@@ -200,9 +160,9 @@ if page == "PDF Analyzer":
                 embeddings = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
                 st.session_state.vector_db = FAISS.from_texts(chunks, embeddings)
 
-        st.success("Document processed")
+        st.success("📄 Document processed successfully")
 
-        q = st.text_input("Ask a question")
+        q = st.text_input("Ask a question about the document")
 
         if q:
             docs = st.session_state.vector_db.similarity_search(q, k=5)
@@ -234,16 +194,17 @@ Rules:
 
         st.markdown("## 💬 Conversation")
         for q,a in st.session_state.chat_history:
-            st.markdown(f"**User:** {q}")
-            st.markdown(f"**SlideSense:** {a}")
-            st.markdown("---")
+            st.markdown(f"<div class='hover-card fade-in'><b>👤 User:</b> {q}<br><b>🤖 SlideSense:</b> {a}</div><br>", unsafe_allow_html=True)
 
 # -------------------- IMAGE RECOGNITION --------------------
 if page == "Image Recognition":
+    st.markdown("<div class='fade-in hover-card'>", unsafe_allow_html=True)
     img_file = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
+    st.markdown("</div>", unsafe_allow_html=True)
+
     if img_file:
         img = Image.open(img_file)
         st.image(img, use_column_width=True)
-        with st.spinner("Analyzing image..."):
+        with st.spinner("🔍 Analyzing image..."):
             desc = describe_image(img)
         st.success(desc)
