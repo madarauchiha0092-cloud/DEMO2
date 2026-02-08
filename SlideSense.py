@@ -119,6 +119,7 @@ with col1:
 with col2:
     type_text("📘 SlideSense AI Platform", 0.03)
     st.markdown("### Smart Learning | Smart Vision | Smart AI")
+st.divider()
 
 # -------------------- PDF Analyzer --------------------
 if page == "📘 PDF Analyzer":
@@ -126,8 +127,10 @@ if page == "📘 PDF Analyzer":
     pdf = st.file_uploader("Upload PDF", type="pdf")
 
     if pdf:
-        with st.spinner("🧠 Processing Document with AI..."):
-            if st.session_state.vector_db is None:
+        if st.session_state.vector_db is None:
+            with st.spinner("🧠 AI is processing your document..."):
+                st_lottie(ai_anim, height=120)
+
                 reader = PdfReader(pdf)
                 text = ""
                 for p in reader.pages:
@@ -150,14 +153,17 @@ if page == "📘 PDF Analyzer":
         q = st.text_input("Ask your question")
 
         if q:
-            docs = st.session_state.vector_db.similarity_search(q, k=5)
-            llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
+            with st.spinner("🤖 AI is thinking..."):
+                st_lottie(ai_anim, height=120)
 
-            history = ""
-            for x,y in st.session_state.chat_history[-5:]:
-                history += f"Q:{x}\nA:{y}\n"
+                docs = st.session_state.vector_db.similarity_search(q, k=5)
+                llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
 
-            prompt = ChatPromptTemplate.from_template("""
+                history = ""
+                for x,y in st.session_state.chat_history[-5:]:
+                    history += f"Q:{x}\nA:{y}\n"
+
+                prompt = ChatPromptTemplate.from_template("""
 History:
 {history}
 
@@ -172,18 +178,17 @@ Rules:
 - If not found say: Information not found in the document
 """)
 
-            chain = create_stuff_documents_chain(llm, prompt)
-            res = chain.invoke({"context":docs,"question":q,"history":history})
+                chain = create_stuff_documents_chain(llm, prompt)
+                res = chain.invoke({"context":docs,"question":q,"history":history})
 
-            st.session_state.chat_history.append((q,res))
+                st.session_state.chat_history.append((q,res))
 
         st.markdown("## 💬 AI Conversation")
         for q,a in st.session_state.chat_history:
-            with st.container():
-                st.markdown(f"🧑 **You:** {q}")
-                time.sleep(0.2)
-                st.markdown(f"🤖 **AI:** {a}")
-                st.divider()
+            st.markdown(f"🧑 **You:** {q}")
+            time.sleep(0.15)
+            st.markdown(f"🤖 **AI:** {a}")
+            st.divider()
 
 # -------------------- Image Recognition --------------------
 if page == "🖼 Image Recognition":
@@ -193,6 +198,9 @@ if page == "🖼 Image Recognition":
     if img_file:
         img = Image.open(img_file)
         st.image(img, use_column_width=True)
+
         with st.spinner("🤖 AI Vision Processing..."):
+            st_lottie(ai_anim, height=120)
             desc = describe_image(img)
+
         st.success(desc)
