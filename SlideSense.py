@@ -1,4 +1,6 @@
 import streamlit as st
+from streamlit_lottie import st_lottie
+import requests
 from PyPDF2 import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -9,93 +11,76 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 import asyncio
 from PIL import Image
 from transformers import BlipProcessor, BlipForConditionalGeneration
+import time
 
-# -------------------- Page Configuration --------------------
-st.set_page_config(
-    page_title="SlideSense",
-    page_icon="📘",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# -------------------- Page Config --------------------
+st.set_page_config(page_title="SlideSense", page_icon="📘", layout="wide")
 
-# -------------------- CSS ANIMATIONS & HOVERS --------------------
-st.markdown("""
-<style>
-.fade-in {
-    animation: fadeIn 1.2s ease-in-out;
-}
-@keyframes fadeIn {
-    from {opacity: 0; transform: translateY(10px);}
-    to {opacity: 1; transform: translateY(0);}
-}
+# -------------------- Lottie Loader --------------------
+def load_lottie(url):
+    r = requests.get(url)
+    if r.status_code != 200:
+        return None
+    return r.json()
 
-.hover-card {
-    transition: 0.3s;
-    padding: 15px;
-    border-radius: 12px;
-}
-.hover-card:hover {
-    transform: scale(1.02);
-    box-shadow: 0 0 15px rgba(0,0,0,0.15);
-}
+login_anim = load_lottie("https://assets10.lottiefiles.com/packages/lf20_jcikwtux.json")
+ai_anim = load_lottie("https://assets10.lottiefiles.com/packages/lf20_qp1q7mct.json")
+upload_anim = load_lottie("https://assets10.lottiefiles.com/packages/lf20_ysrn2iwp.json")
 
-button {
-    transition: 0.3s !important;
-}
-button:hover {
-    transform: scale(1.05);
-    filter: brightness(1.1);
-}
-</style>
-""", unsafe_allow_html=True)
-
-# -------------------- Session State --------------------
+# -------------------- Session --------------------
 defaults = {
     "chat_history": [],
     "vector_db": None,
     "authenticated": False,
     "users": {"admin": "admin123"}
 }
-
 for k,v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# -------------------- AUTH UI --------------------
+# -------------------- Typing Effect --------------------
+def type_text(text, speed=0.02):
+    container = st.empty()
+    typed = ""
+    for c in text:
+        typed += c
+        container.markdown(f"### {typed}")
+        time.sleep(speed)
+
+# -------------------- Auth UI --------------------
 def login_ui():
-    st.markdown("<h1 class='fade-in' style='text-align:center;'>🔐 SlideSense Login</h1>", unsafe_allow_html=True)
-    tab1, tab2 = st.tabs(["Login", "Sign Up"])
+    col1, col2 = st.columns([1,1])
 
-    # ----- Login -----
-    with tab1:
-        st.markdown("<div class='hover-card fade-in'>", unsafe_allow_html=True)
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
-        if st.button("Login"):
-            if u in st.session_state.users and st.session_state.users[u] == p:
-                st.session_state.authenticated = True
-                st.success("✅ Login successful")
-                st.rerun()
-            else:
-                st.error("❌ Invalid credentials")
-        st.markdown("</div>", unsafe_allow_html=True)
+    with col1:
+        st_lottie(login_anim, height=300)
+    with col2:
+        type_text("🔐 Welcome to SlideSense", 0.05)
+        st.markdown("### AI Powered Learning Platform")
 
-    # ----- Signup -----
-    with tab2:
-        st.markdown("<div class='hover-card fade-in'>", unsafe_allow_html=True)
-        nu = st.text_input("Create Username")
-        np = st.text_input("Create Password", type="password")
-        if st.button("Sign Up"):
-            if nu in st.session_state.users:
-                st.warning("User exists")
-            elif nu == "" or np == "":
-                st.warning("Fields required")
-            else:
-                st.session_state.users[nu] = np
-                st.success("Account created successfully 🎉")
-        st.markdown("</div>", unsafe_allow_html=True)
+        tab1, tab2 = st.tabs(["Login", "Sign Up"])
 
-# -------------------- BLIP Model --------------------
+        with tab1:
+            u = st.text_input("Username")
+            p = st.text_input("Password", type="password")
+            if st.button("Login"):
+                if u in st.session_state.users and st.session_state.users[u] == p:
+                    st.success("Login Successful 🚀")
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials ❌")
+
+        with tab2:
+            nu = st.text_input("New Username")
+            np = st.text_input("New Password", type="password")
+            if st.button("Create Account"):
+                if nu in st.session_state.users:
+                    st.warning("User already exists")
+                else:
+                    st.session_state.users[nu] = np
+                    st.success("Account created 🎉")
+
+# -------------------- BLIP --------------------
 @st.cache_resource
 def load_blip():
     processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
@@ -104,45 +89,45 @@ def load_blip():
 
 processor, blip_model = load_blip()
 
-def describe_image(image: Image.Image):
+def describe_image(image):
     inputs = processor(image, return_tensors="pt")
     out = blip_model.generate(**inputs)
     return processor.decode(out[0], skip_special_tokens=True)
 
-# -------------------- AUTH CHECK --------------------
+# -------------------- Auth Check --------------------
 if not st.session_state.authenticated:
     login_ui()
     st.stop()
 
 # -------------------- Sidebar --------------------
-st.sidebar.success("✅ Logged in")
-if st.sidebar.button("🚪 Logout"):
+st.sidebar.success("Logged in ✅")
+if st.sidebar.button("Logout"):
     for k in defaults:
         st.session_state[k] = defaults[k]
     st.rerun()
 
-page = st.sidebar.selectbox("Choose Mode", ["PDF Analyzer", "Image Recognition"])
+page = st.sidebar.radio("Mode", ["📘 PDF Analyzer", "🖼 Image Recognition"])
 
-st.sidebar.markdown("## 💬 Chat History")
-for i,(q,a) in enumerate(st.session_state.chat_history[-10:],1):
-    st.sidebar.markdown(f"Q{i}: {q[:40]}")
+st.sidebar.markdown("### 💬 History")
+for q,a in st.session_state.chat_history[-8:]:
+    st.sidebar.markdown(f"- {q[:30]}")
 
-# -------------------- HERO --------------------
-st.markdown("""
-<h1 class='fade-in' style='text-align:center;'>📘 SlideSense</h1>
-<p class='fade-in' style='text-align:center;'>AI Powered PDF Analyzer & Image Intelligence System</p>
-<hr>
-""", unsafe_allow_html=True)
+# -------------------- Hero --------------------
+col1, col2 = st.columns([1,2])
+with col1:
+    st_lottie(ai_anim, height=260)
+with col2:
+    type_text("📘 SlideSense AI Platform", 0.03)
+    st.markdown("### Smart Learning | Smart Vision | Smart AI")
 
-# -------------------- PDF ANALYZER --------------------
-if page == "PDF Analyzer":
-    st.markdown("<div class='fade-in hover-card'>", unsafe_allow_html=True)
+# -------------------- PDF Analyzer --------------------
+if page == "📘 PDF Analyzer":
+    st_lottie(upload_anim, height=180)
     pdf = st.file_uploader("Upload PDF", type="pdf")
-    st.markdown("</div>", unsafe_allow_html=True)
 
     if pdf:
-        if st.session_state.vector_db is None:
-            with st.spinner("Processing PDF..."):
+        with st.spinner("🧠 Processing Document with AI..."):
+            if st.session_state.vector_db is None:
                 reader = PdfReader(pdf)
                 text = ""
                 for p in reader.pages:
@@ -160,9 +145,9 @@ if page == "PDF Analyzer":
                 embeddings = HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
                 st.session_state.vector_db = FAISS.from_texts(chunks, embeddings)
 
-        st.success("📄 Document processed successfully")
+        st.success("PDF Ready 🚀")
 
-        q = st.text_input("Ask a question about the document")
+        q = st.text_input("Ask your question")
 
         if q:
             docs = st.session_state.vector_db.similarity_search(q, k=5)
@@ -192,19 +177,22 @@ Rules:
 
             st.session_state.chat_history.append((q,res))
 
-        st.markdown("## 💬 Conversation")
+        st.markdown("## 💬 AI Conversation")
         for q,a in st.session_state.chat_history:
-            st.markdown(f"<div class='hover-card fade-in'><b>👤 User:</b> {q}<br><b>🤖 SlideSense:</b> {a}</div><br>", unsafe_allow_html=True)
+            with st.container():
+                st.markdown(f"🧑 **You:** {q}")
+                time.sleep(0.2)
+                st.markdown(f"🤖 **AI:** {a}")
+                st.divider()
 
-# -------------------- IMAGE RECOGNITION --------------------
-if page == "Image Recognition":
-    st.markdown("<div class='fade-in hover-card'>", unsafe_allow_html=True)
+# -------------------- Image Recognition --------------------
+if page == "🖼 Image Recognition":
+    st_lottie(upload_anim, height=180)
     img_file = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
-    st.markdown("</div>", unsafe_allow_html=True)
 
     if img_file:
         img = Image.open(img_file)
         st.image(img, use_column_width=True)
-        with st.spinner("🔍 Analyzing image..."):
+        with st.spinner("🤖 AI Vision Processing..."):
             desc = describe_image(img)
         st.success(desc)
