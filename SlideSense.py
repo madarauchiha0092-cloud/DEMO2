@@ -359,55 +359,90 @@ def call_llm_with_retry(fn, *args, max_attempts=5, **kwargs):
 
 
 # -------------------- PDF HELPERS --------------------
-def extract_pdf_text_safe(pdf_file):
-    """Extract text from PDF with per-page error isolation."""
-    try:
-        reader = PdfReader(pdf_file)
-    except Exception as e:
-        st.error(f"Could not read PDF: {e}")
-        return "", 0
-    pages_text = []
-    total = len(reader.pages)
-    for i, page in enumerate(reader.pages):
-        try:
-            t = page.extract_text() or ""
-            pages_text.append(t)
-        except Exception:
-            pages_text.append("")   # skip bad page, keep going
-    combined = "\n".join(pages_text)
-    return combined, total
-
-
-def build_vector_db(text, total_pages):
-    """
-    Smart chunking: bigger chunks for large PDFs to stay within
-    embedding memory limits; smaller for short ones for precision.
-    """
-    if total_pages > 100:
-        chunk_size, overlap = 800, 100
-    elif total_pages > 30:
-        chunk_size, overlap = 600, 80
-    else:
-        chunk_size, overlap = 400, 60
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size, chunk_overlap=overlap
-    )
-    chunks = splitter.split_text(text)
-
-    # Safety cap: never embed more than 800 chunks (avoids memory / time blowout)
-    MAX_CHUNKS = 800
-    if len(chunks) > MAX_CHUNKS:
-        # Keep evenly-spaced chunks so we cover the whole document
-        step = len(chunks) // MAX_CHUNKS
-        chunks = chunks[::step][:MAX_CHUNKS]
-
-    emb = HuggingFaceEmbeddings(
+@st.cache_resource(show_spinner=False)
+def get_embeddings_model():
+    """Load once, reuse forever — avoids reload on every PDF upload."""
+    return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2",
         model_kwargs={"device": "cpu"},
         encode_kwargs={"batch_size": 32, "normalize_embeddings": True},
     )
-    return FAISS.from_texts(chunks, emb), len(chunks)
+
+
+def extract_pdf_text_safe(pdf_file):
+    """
+    Extract text page-by-page with full error isolation.
+    Returns (text, page_count).  Never raises.
+    """
+    try:
+        reader = PdfReader(pdf_file)
+    except Exception as e:
+        return "", 0, f"Cannot open PDF: {e}"
+
+    pages_text = []
+    total = len(reader.pages)
+    failed = 0
+    for page in reader.pages:
+        try:
+            pages_text.append(page.extract_text() or "")
+        except Exception:
+            pages_text.append("")
+            failed += 1
+
+    combined = "\n".join(pages_text).strip()
+    warn = f" ({failed} pages could not be read)" if failed else ""
+    return combined, total, warn
+
+
+def build_vector_db(text, total_pages, progress_cb=None):
+    """
+    True incremental batched embedding into FAISS.
+    Each batch is embedded and merged immediately — no single blocking call.
+    Caps at 400 chunks max for speed and memory safety.
+    """
+    # Adaptive chunk size based on doc length
+    if total_pages > 150:
+        chunk_size, overlap = 1200, 100
+    elif total_pages > 50:
+        chunk_size, overlap = 900, 80
+    elif total_pages > 20:
+        chunk_size, overlap = 600, 60
+    else:
+        chunk_size, overlap = 400, 50
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size, chunk_overlap=overlap,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
+    chunks = splitter.split_text(text)
+
+    # Hard cap — evenly sampled so whole doc stays covered
+    MAX_CHUNKS = 400
+    if len(chunks) > MAX_CHUNKS:
+        step = max(1, len(chunks) // MAX_CHUNKS)
+        chunks = chunks[::step][:MAX_CHUNKS]
+
+    total_chunks = len(chunks)
+    if progress_cb:
+        progress_cb(50, f"Indexing {total_chunks} chunks (0/{total_chunks})...")
+
+    emb = get_embeddings_model()
+
+    # ── True incremental embedding: build FAISS batch by batch ──
+    BATCH = 50          # small batches → progress updates feel responsive
+    vdb = None
+    for i in range(0, total_chunks, BATCH):
+        batch = chunks[i : i + BATCH]
+        if vdb is None:
+            vdb = FAISS.from_texts(batch, emb)
+        else:
+            vdb.add_texts(batch)
+        done = min(i + BATCH, total_chunks)
+        if progress_cb:
+            pct = 50 + int(45 * done / total_chunks)
+            progress_cb(pct, f"Indexing chunks ({done}/{total_chunks})...")
+
+    return vdb, total_chunks
 
 
 # ==================== AUTH SCREEN ====================
@@ -786,10 +821,18 @@ body {
             st.caption("Upload a PDF and ask questions about its content.")
         st.divider()
 
-        pdf = st.file_uploader("Upload PDF", type="pdf")
+        pdf = st.file_uploader("Upload PDF", type=["pdf"], accept_multiple_files=False)
 
-        # ---- NEW PDF SCANNING ANIMATION ----
+        # ---- PDF PROCESSING ----
         if pdf and st.session_state.vector_db is None:
+            # File size guard — warn if > 50 MB
+            pdf_size_mb = len(pdf.getvalue()) / (1024 * 1024)
+            if pdf_size_mb > 50:
+                st.warning(
+                    f"⚠️ This PDF is **{pdf_size_mb:.1f} MB**. "
+                    "Very large files may take longer to process."
+                )
+
             anim_slot = st.empty()
             with anim_slot:
                 components.html("""<!DOCTYPE html>
@@ -882,29 +925,44 @@ body {
 </html>""", height=120)
 
             # ── Robust large-PDF processing ──
-            progress_bar = st.progress(0, text="Reading PDF pages...")
-            text, total_pages = extract_pdf_text_safe(pdf)
+            progress_bar = st.progress(0, text="📄 Reading PDF pages...")
 
-            if not text.strip():
+            try:
+                # Step 1 – extract text
+                progress_bar.progress(10, text="📄 Extracting text from pages...")
+                text, total_pages, warn = extract_pdf_text_safe(pdf)
+
+                if not text.strip():
+                    raise ValueError(
+                        "No text could be extracted. The PDF may be scanned/image-based "
+                        "or password-protected. Try a text-based PDF."
+                    )
+
+                if warn:
+                    st.warning(f"⚠️ {warn}")
+
+                progress_bar.progress(40, text=f"✅ Read {total_pages} pages. Starting index build...")
+
+                # Step 2 – truly incremental embedding — progress updates after every 50 chunks
+                def _progress_cb(pct, msg):
+                    progress_bar.progress(min(int(pct), 99), text=msg)
+
+                vdb, num_chunks = build_vector_db(text, total_pages, progress_cb=_progress_cb)
+                st.session_state.vector_db = vdb
+
+                progress_bar.progress(100, text="✅ Indexing complete!")
                 anim_slot.empty()
                 progress_bar.empty()
-                st.error("❌ Could not extract any text from this PDF. It may be scanned/image-based.")
-            else:
-                progress_bar.progress(40, text=f"Extracted text from {total_pages} pages. Building index...")
-                try:
-                    vdb, num_chunks = build_vector_db(text, total_pages)
-                    st.session_state.vector_db = vdb
-                    progress_bar.progress(100, text="Done!")
-                    anim_slot.empty()
-                    progress_bar.empty()
-                    st.success(
-                        f"✅ PDF processed — **{total_pages} pages**, "
-                        f"**{num_chunks} chunks** indexed. Ask your questions below."
-                    )
-                except Exception as _build_err:
-                    anim_slot.empty()
-                    progress_bar.empty()
-                    st.error(f"❌ Failed to build index: {_build_err}")
+                st.success(
+                    f"✅ Ready! **{total_pages} pages** · **{num_chunks} chunks** indexed. "
+                    "Ask your questions below 👇"
+                )
+
+            except Exception as _proc_err:
+                anim_slot.empty()
+                progress_bar.empty()
+                st.session_state.vector_db = None
+                st.error(f"❌ Failed to process PDF: {_proc_err}")
 
     else:
         ac, tc = st.columns([1, 4])
