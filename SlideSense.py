@@ -321,26 +321,93 @@ def load_llm():
         model="gemini-1.5-flash",
         temperature=0.3,
         google_api_key=st.secrets["GOOGLE_API_KEY"],
-        max_retries=3,
+        max_retries=2,
+        max_output_tokens=1024,
     )
 
-def call_llm_with_retry(fn, *args, max_attempts=4, **kwargs):
-    """Call an LLM function with exponential backoff on quota errors."""
+def call_llm_with_retry(fn, *args, max_attempts=5, **kwargs):
+    """Exponential backoff retry — silently waits on quota errors, never crashes."""
     import time as _time
-    delays = [10, 20, 40, 60]
+    delays = [5, 15, 30, 60, 90]
+    last_err = None
     for attempt, delay in enumerate(delays[:max_attempts], 1):
         try:
-            return fn(*args, **kwargs), None
+            result = fn(*args, **kwargs)
+            return result, None
         except ResourceExhausted:
-            if attempt == max_attempts:
-                return None, (
-                    "⚠️ **API quota exceeded.** The Gemini API is temporarily rate-limited.\n\n"
-                    "Please wait a minute and try your question again."
-                )
-            _time.sleep(delay)
-        except Exception as _e:
-            return None, f"⚠️ **An error occurred:** {type(_e).__name__} — please try again."
-    return None, "⚠️ Unexpected error. Please try again."
+            last_err = "quota"
+            if attempt < max_attempts:
+                wait_slot = st.empty()
+                for remaining in range(delay, 0, -1):
+                    wait_slot.info(
+                        f"⏳ API rate limit hit — auto-retrying in **{remaining}s** "
+                        f"(attempt {attempt}/{max_attempts})..."
+                    )
+                    _time.sleep(1)
+                wait_slot.empty()
+        except Exception as _ex:
+            last_err = type(_ex).__name__
+            if attempt < max_attempts:
+                _time.sleep(5)
+    if last_err == "quota":
+        return None, (
+            "⚠️ **Gemini API quota exhausted after multiple retries.**\n\n"
+            "The free tier allows ~15 requests/min. Please wait 1–2 minutes, "
+            "then ask your question again."
+        )
+    return None, f"⚠️ **Error ({last_err})** — please try again in a moment."
+
+
+# -------------------- PDF HELPERS --------------------
+def extract_pdf_text_safe(pdf_file):
+    """Extract text from PDF with per-page error isolation."""
+    try:
+        reader = PdfReader(pdf_file)
+    except Exception as e:
+        st.error(f"Could not read PDF: {e}")
+        return "", 0
+    pages_text = []
+    total = len(reader.pages)
+    for i, page in enumerate(reader.pages):
+        try:
+            t = page.extract_text() or ""
+            pages_text.append(t)
+        except Exception:
+            pages_text.append("")   # skip bad page, keep going
+    combined = "\n".join(pages_text)
+    return combined, total
+
+
+def build_vector_db(text, total_pages):
+    """
+    Smart chunking: bigger chunks for large PDFs to stay within
+    embedding memory limits; smaller for short ones for precision.
+    """
+    if total_pages > 100:
+        chunk_size, overlap = 800, 100
+    elif total_pages > 30:
+        chunk_size, overlap = 600, 80
+    else:
+        chunk_size, overlap = 400, 60
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size, chunk_overlap=overlap
+    )
+    chunks = splitter.split_text(text)
+
+    # Safety cap: never embed more than 800 chunks (avoids memory / time blowout)
+    MAX_CHUNKS = 800
+    if len(chunks) > MAX_CHUNKS:
+        # Keep evenly-spaced chunks so we cover the whole document
+        step = len(chunks) // MAX_CHUNKS
+        chunks = chunks[::step][:MAX_CHUNKS]
+
+    emb = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={"batch_size": 32, "normalize_embeddings": True},
+    )
+    return FAISS.from_texts(chunks, emb), len(chunks)
 
 
 # ==================== AUTH SCREEN ====================
@@ -814,15 +881,30 @@ body {
 </body>
 </html>""", height=120)
 
-            reader = PdfReader(pdf)
-            text = "".join(p.extract_text() or "" for p in reader.pages)
-            splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=80)
-            chunks = splitter.split_text(text)
-            emb = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-            st.session_state.vector_db = FAISS.from_texts(chunks, emb)
+            # ── Robust large-PDF processing ──
+            progress_bar = st.progress(0, text="Reading PDF pages...")
+            text, total_pages = extract_pdf_text_safe(pdf)
 
-            anim_slot.empty()
-            st.success("✅ PDF processed! Ask your questions below.")
+            if not text.strip():
+                anim_slot.empty()
+                progress_bar.empty()
+                st.error("❌ Could not extract any text from this PDF. It may be scanned/image-based.")
+            else:
+                progress_bar.progress(40, text=f"Extracted text from {total_pages} pages. Building index...")
+                try:
+                    vdb, num_chunks = build_vector_db(text, total_pages)
+                    st.session_state.vector_db = vdb
+                    progress_bar.progress(100, text="Done!")
+                    anim_slot.empty()
+                    progress_bar.empty()
+                    st.success(
+                        f"✅ PDF processed — **{total_pages} pages**, "
+                        f"**{num_chunks} chunks** indexed. Ask your questions below."
+                    )
+                except Exception as _build_err:
+                    anim_slot.empty()
+                    progress_bar.empty()
+                    st.error(f"❌ Failed to build index: {_build_err}")
 
     else:
         ac, tc = st.columns([1, 4])
@@ -1024,32 +1106,38 @@ body {
             if st.session_state.vector_db is None:
                 answer = "⚠️ Please upload a PDF first."
             else:
-                # Check cache first to avoid redundant API calls
+                # ── Cache check: skip API call if already answered ──
                 _cache_key = f"{st.session_state.current_chat_id}::{question.strip().lower()}"
                 if _cache_key in st.session_state.response_cache:
                     answer = st.session_state.response_cache[_cache_key]
                 else:
-                    with st.spinner("Thinking..."):
-                        docs = st.session_state.vector_db.similarity_search(question, k=3)
-                        _prompt = ChatPromptTemplate.from_template(
-                            "You are an AI assistant that answers questions using the provided context.\n\n"
-                            "Instructions:\n"
-                            "1. Generate the best possible answer to the user's question using the context.\n"
-                            "2. After generating the answer, estimate how accurate the answer is based on how well it matches the provided context.\n"
-                            "3. Print the answer normally.\n"
-                            "4. Leave exactly TWO blank lines after the answer.\n"
-                            "5. Then on a new line, print the accuracy in this exact format: Accuracy: XX%\n\n"
-                            "Rules:\n"
-                            "- The accuracy must be between 0% and 100%.\n"
-                            "- Do not print explanations about the accuracy.\n"
-                            "- Only show the answer, followed by two blank lines, followed by the accuracy line.\n"
-                            "- If information is not found in the document, say: Information not found in document. Then leave two blank lines. Then print: Accuracy: 0%\n\n"
-                            "Context:\n{context}\n\nQuestion:\n{input}"
+                    with st.spinner("Searching document and generating answer..."):
+                        # Retrieve top-3 most relevant chunks; trim each to 400 chars
+                        # so total context stays well within token limits
+                        raw_docs = st.session_state.vector_db.similarity_search(question, k=3)
+                        trimmed_context = "\n\n---\n\n".join(
+                            d.page_content[:400] for d in raw_docs
                         )
+
+                        _prompt = ChatPromptTemplate.from_template(
+                            "You are a precise AI assistant. Answer ONLY from the context below.\n\n"
+                            "Context (excerpts from the uploaded document):\n{context}\n\n"
+                            "Question: {input}\n\n"
+                            "Instructions:\n"
+                            "- Give a clear, concise answer based strictly on the context.\n"
+                            "- If the answer is not in the context, say: Information not found in document.\n"
+                            "- After your answer, on a NEW line write exactly: Accuracy: XX% "
+                            "(your confidence 0–100 based on how well context matches the question).\n"
+                            "- Do NOT add any explanation after the Accuracy line."
+                        )
+
                         def _run_pdf_chain():
+                            from langchain_core.documents import Document as _Doc
+                            _doc = _Doc(page_content=trimmed_context)
                             chain = create_stuff_documents_chain(load_llm(), _prompt)
-                            result = chain.invoke({"context": docs, "input": question})
+                            result = chain.invoke({"context": [_doc], "input": question})
                             return result if isinstance(result, str) else result.get("output_text", str(result))
+
                         answer, err = call_llm_with_retry(_run_pdf_chain)
                         if err:
                             answer = err
